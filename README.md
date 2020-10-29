@@ -14,7 +14,7 @@ by other authors.*
 
 - [**Suggested prerequisites**](#suggested-prerequisites)
 - [**Projects**](#projects) — Introduction to each of the projects
-  - [**Derive macro:** `derive(Builder)`](#derive-macro-derivebuilder)
+  - ~~[**Derive macro:** `derive(Builder)`](#derive-macro-derivebuilder)~~
   - [**Derive macro:** `derive(CustomDebug)`](#derive-macro-derivecustomdebug)
   - [**Function-like macro:** `seq!`](#function-like-macro-seq)
   - [**Attribute macro:** `#[sorted]`](#attribute-macro-sorted)
