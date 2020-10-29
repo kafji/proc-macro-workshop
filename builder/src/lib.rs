@@ -1,7 +1,6 @@
 extern crate proc_macro;
 
-use crate::field::*;
-use itertools::Itertools;
+use crate::builder_field::*;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::{
@@ -26,268 +25,147 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 type Result<T> = std::result::Result<T, error::Error>;
 
 fn derive_impl(input: DeriveInput) -> Result<TokenStream> {
-    let strukt: BuilderStruct = (&input).try_into()?;
-    let struct_definition = def_builder_struct(&strukt)?;
-    let setters = impl_builder_setters(&strukt)?;
-    let builder_ctor = impl_builder_ctor(&strukt)?;
-    let target_ctor = impl_target_ctor(&strukt)?;
+    let builder: Builder = (&input).try_into()?;
+    let strukt = builder.gen_builder_struct()?;
+    let setters = builder.gen_builder_setters()?;
+    let ctor = builder.gen_builder_ctor()?;
+    let build = builder.gen_builder_build()?;
     let output = quote! {
-        #struct_definition
+        #strukt
         #setters
-        #builder_ctor
-        #target_ctor
+        #ctor
+        #build
     };
     Ok(output)
 }
 
-#[cfg(test)]
-fn create_input() -> DeriveInput {
-    parse_quote! {
-        #[derive(Builder)]
-        pub struct Command {
-            executable: String,
-            #[builder(each = "arg")]
-            args: Vec<String>,
-            #[builder(each = "env")]
-            env: Vec<String>,
-            current_dir: Option<String>,
-        }
-    }
-}
-
-fn def_builder_struct<'a>(strukt: &'a BuilderStruct) -> Result<ItemStruct> {
-    let struct_name = &strukt.builder_name;
-    let (field_name, field_ty): (Vec<_>, Vec<Type>) = strukt
-        .fields
-        .iter()
-        .map(|field| -> (_, Type) {
-            let ty = field.ty();
-            let ty = if field.is_repeatable() {
-                parse_quote! { std::vec::Vec<#ty> }
-            } else {
-                parse_quote! { std::option::Option<#ty> }
-            };
-            (field.name(), ty)
-        })
-        .unzip();
-    let output = syn::parse_quote! {
-        #[derive(std::default::Default)]
-        pub struct #struct_name {
-            #(#field_name: #field_ty,)*
-        }
-    };
-    Ok(output)
-}
-
-#[cfg(test)]
-#[test]
-fn test_def_builder_struct() {
-    let input = create_input();
-    let builder_struct: BuilderStruct = (&input).try_into().unwrap();
-
-    let output = def_builder_struct(&builder_struct);
-
-    let expected: Result<ItemStruct> = Ok(parse_quote! {
-        #[derive(std::default::Default)]
-        pub struct CommandBuilder {
-            executable: std::option::Option<String>,
-            args: std::vec::Vec<String>,
-            env: std::vec::Vec<String>,
-            current_dir: std::option::Option<String>,
-        }
-    });
-    assert_eq!(expected.stringify(), output.stringify());
-}
-
-fn impl_builder_setters<'a>(strukt: &'a BuilderStruct) -> Result<ItemImpl> {
-    let struct_name = &strukt.builder_name;
-
-    fn gen_setters(field: &BuilderField) -> impl Iterator<Item = ImplItemMethod> {
-        match field {
-            BuilderField::Repeatable { name, ty, setter } => {
-                let mut setters = Vec::with_capacity(2);
-                setters.push(parse_quote! {
-                    pub fn #setter(&mut self, #setter: #ty) -> &mut Self {
-                        self.#name.push(#setter);
-                        self
-                    }
-                });
-                if name != setter {
-                    setters.push(parse_quote! {
-                        pub fn #name(&mut self, #name: std::vec::Vec<#ty>) -> &mut Self {
-                            self.#name = #name;
-                            self
-                        }
-                    });
-                }
-                setters
-            }
-            _ => {
-                let name = field.name();
-                let ty = field.ty();
-                vec![parse_quote! {
-                    pub fn #name(&mut self, #name: #ty) -> &mut Self {
-                        self.#name = std::option::Option::Some(#name);
-                        self
-                    }
-                }]
-            }
-        }
-        .into_iter()
-    }
-
-    let method = strukt.fields.iter().flat_map(gen_setters);
-
-    let output = parse_quote! {
-        impl #struct_name {
-            #(#method)*
-        }
-    };
-    Ok(output)
-}
-
-#[cfg(test)]
-#[test]
-fn test_impl_builder_setters() {
-    let input = create_input();
-    let builder_struct: BuilderStruct = (&input).try_into().unwrap();
-
-    let output = impl_builder_setters(&builder_struct);
-
-    let expected: Result<ItemImpl> = Ok(parse_quote! {
-        impl CommandBuilder {
-            pub fn executable(&mut self, executable: String) -> &mut Self {
-                self.executable = std::option::Option::Some(executable);
-                self
-            }
-
-            pub fn arg(&mut self, arg: String) -> &mut Self {
-                self.args.push(arg);
-                self
-            }
-
-            pub fn args(&mut self, args: std::vec::Vec<String>) -> &mut Self {
-                self.args = args;
-                self
-            }
-
-            pub fn env(&mut self, env: String) -> &mut Self {
-                self.env.push(env);
-                self
-            }
-
-            pub fn current_dir(&mut self, current_dir: String) -> &mut Self {
-                self.current_dir = std::option::Option::Some(current_dir);
-                self
-            }
-        }
-    });
-    assert_eq!(expected.stringify(), output.stringify());
-}
-
-fn impl_builder_ctor<'a>(strukt: &'a BuilderStruct) -> Result<ItemImpl> {
-    let target_name = strukt.target_name;
-    let builder_name = &strukt.builder_name;
-    let output = parse_quote! {
-        impl #target_name {
-            pub fn builder() -> #builder_name {
-                <#builder_name>::default()
-            }
-        }
-    };
-    Ok(output)
-}
-
-#[cfg(test)]
-#[test]
-fn test_impl_builder_ctor() {
-    let input = create_input();
-    let builder_struct: BuilderStruct = (&input).try_into().unwrap();
-
-    let output = impl_builder_ctor(&builder_struct);
-
-    let expected: Result<ItemImpl> = Ok(parse_quote! {
-        impl Command {
-            pub fn builder() -> CommandBuilder {
-                <CommandBuilder>::default()
-            }
-        }
-    });
-    assert_eq!(expected.stringify(), output.stringify());
-}
-
-fn impl_target_ctor<'a>(strukt: &'a BuilderStruct) -> Result<ItemImpl> {
-    let target_name = strukt.target_name;
-    let builder_name = &strukt.builder_name;
-
-    fn gen_field_value(field: &BuilderField) -> FieldValue {
-        match field {
-            BuilderField::Required { name, .. } => {
-                let err_msg = format!("{} must be set", name);
-                parse_quote! {
-                    #name: self.#name.as_ref().cloned().ok_or_else(|| #err_msg)?
-                }
-            }
-            BuilderField::Optional { name, .. } => {
-                parse_quote! {
-                    #name: self.#name.as_ref().cloned()
-                }
-            }
-            BuilderField::Repeatable { name, .. } => {
-                parse_quote! {
-                    #name: self.#name.clone()
-                }
-            }
-        }
-    }
-
-    let field = strukt.fields.iter().map(gen_field_value).collect_vec();
-
-    let output = parse_quote! {
-        impl #builder_name {
-            pub fn build(&self) -> std::result::Result<#target_name, std::boxed::Box<dyn std::error::Error>> {
-                let target = #target_name {
-                    #(#field,)*
-                };
-                Ok(target)
-            }
-        }
-    };
-    Ok(output)
-}
-
-#[cfg(test)]
-#[test]
-fn test_impl_target_ctor() {
-    let input = create_input();
-    let builder_struct: BuilderStruct = (&input).try_into().unwrap();
-
-    let output = impl_target_ctor(&builder_struct);
-
-    let expected: Result<ItemImpl> = Ok(parse_quote! {
-        impl CommandBuilder {
-            pub fn build(&self) -> std::result::Result<Command, std::boxed::Box<dyn std::error::Error>> {
-                let target = Command {
-                    executable: self.executable.as_ref().cloned().ok_or_else(|| "executable must be set")?,
-                    args: self.args.clone(),
-                    env: self.env.clone(),
-                    current_dir: self.current_dir.as_ref().cloned(),
-                };
-                Ok(target)
-            }
-        }
-    });
-    assert_eq!(expected.stringify(), output.stringify());
-}
-
-#[derive(Debug)]
-struct BuilderStruct<'a> {
+struct Builder<'a> {
     pub target_name: &'a Ident,
     pub builder_name: Ident,
     pub fields: Vec<BuilderField<'a>>,
 }
 
-impl<'a, 'b> convert::TryFrom<&'a DeriveInput> for BuilderStruct<'b>
+impl Builder<'_> {
+    fn gen_builder_struct(&self) -> Result<ItemStruct> {
+        let struct_name = &self.builder_name;
+        let (field_name, field_ty): (Vec<_>, Vec<Type>) = self
+            .fields
+            .iter()
+            .map(|field| -> (_, Type) {
+                let ty = field.ty();
+                let ty = if field.is_repeatable() {
+                    parse_quote! { std::vec::Vec<#ty> }
+                } else {
+                    parse_quote! { std::option::Option<#ty> }
+                };
+                (field.name(), ty)
+            })
+            .unzip();
+        let output = syn::parse_quote! {
+            #[derive(std::default::Default)]
+            pub struct #struct_name {
+                #(#field_name: #field_ty,)*
+            }
+        };
+        Ok(output)
+    }
+
+    fn gen_builder_setters(&self) -> Result<ItemImpl> {
+        let struct_name = &self.builder_name;
+        fn gen_setters(field: &BuilderField) -> impl Iterator<Item = ImplItemMethod> {
+            match field {
+                BuilderField::Repeatable { name, ty, setter } => {
+                    let mut setters = Vec::with_capacity(2);
+                    setters.push(parse_quote! {
+                        pub fn #setter(&mut self, #setter: #ty) -> &mut Self {
+                            self.#name.push(#setter);
+                            self
+                        }
+                    });
+                    if name != setter {
+                        setters.push(parse_quote! {
+                            pub fn #name(&mut self, #name: std::vec::Vec<#ty>) -> &mut Self {
+                                self.#name = #name;
+                                self
+                            }
+                        });
+                    }
+                    setters
+                }
+                _ => {
+                    let name = field.name();
+                    let ty = field.ty();
+                    vec![parse_quote! {
+                        pub fn #name(&mut self, #name: #ty) -> &mut Self {
+                            self.#name = std::option::Option::Some(#name);
+                            self
+                        }
+                    }]
+                }
+            }
+            .into_iter()
+        }
+        let method = self.fields.iter().flat_map(gen_setters);
+        let output = parse_quote! {
+            impl #struct_name {
+                #(#method)*
+            }
+        };
+        Ok(output)
+    }
+
+    fn gen_builder_ctor(&self) -> Result<ItemImpl> {
+        let target_name = self.target_name;
+        let builder_name = &self.builder_name;
+        let output = parse_quote! {
+            impl #target_name {
+                pub fn builder() -> #builder_name {
+                    <#builder_name>::default()
+                }
+            }
+        };
+        Ok(output)
+    }
+
+    fn gen_builder_build(&self) -> Result<ItemImpl> {
+        let target_name = self.target_name;
+        let builder_name = &self.builder_name;
+        fn gen_field_value(field: &BuilderField) -> FieldValue {
+            match field {
+                BuilderField::Required { name, .. } => {
+                    let err_msg = format!("{} must be set", name);
+                    parse_quote! {
+                        #name: self.#name.as_ref().cloned().ok_or_else(|| #err_msg)?
+                    }
+                }
+                BuilderField::Optional { name, .. } => {
+                    parse_quote! {
+                        #name: self.#name.as_ref().cloned()
+                    }
+                }
+                BuilderField::Repeatable { name, .. } => {
+                    parse_quote! {
+                        #name: self.#name.clone()
+                    }
+                }
+            }
+        }
+        let field = self.fields.iter().map(gen_field_value).collect::<Vec<_>>();
+        let output = parse_quote! {
+            impl #builder_name {
+                pub fn build(&self) -> std::result::Result<#target_name, std::boxed::Box<dyn std::error::Error>> {
+                    let target = #target_name {
+                        #(#field,)*
+                    };
+                    Ok(target)
+                }
+            }
+        };
+        Ok(output)
+    }
+}
+
+impl<'a, 'b> convert::TryFrom<&'a DeriveInput> for Builder<'b>
 where
     'a: 'b,
 {
@@ -297,7 +175,7 @@ where
         let target = &value.ident;
         if let Data::Struct(data) = &value.data {
             let fields = BuilderField::from_fields(&data.fields)?;
-            let strukt = BuilderStruct {
+            let strukt = Builder {
                 target_name: target,
                 builder_name: format_ident!("{}Builder", target),
                 fields,
@@ -309,7 +187,36 @@ where
     }
 }
 
-mod field {
+mod error {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Error(syn::Error);
+
+    impl From<syn::Error> for Error {
+        fn from(value: syn::Error) -> Self {
+            Self(value)
+        }
+    }
+
+    impl ops::Deref for Error {
+        type Target = syn::Error;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl PartialEq for Error {
+        fn eq(&self, other: &Self) -> bool {
+            self.0.to_string() == other.0.to_string()
+        }
+    }
+
+    impl Eq for Error {}
+}
+
+mod builder_field {
     use super::*;
     use proc_macro2::Span;
     use std::convert;
@@ -414,7 +321,6 @@ mod field {
 
         fn try_from(field: &'f Field) -> Result<Self> {
             let name = field.ident.clone().expect("expected named field");
-
             fn repeatable_setter_name(meta: &Meta) -> Result<Ident> {
                 let name = match meta {
                     Meta::List(list) => match list.nested.first() {
@@ -437,15 +343,11 @@ mod field {
                         Error::new_spanned(meta, r#"expected `builder(each = "...")`"#).into()
                     })
             }
-
             let output = if let Some(attr) = builder_attr(&field) {
                 let meta = attr.parse_meta()?;
-
                 let setter = repeatable_setter_name(&meta)?;
-
                 let ty = is_repeatable(&field.ty);
                 let ty = ty.ok_or_else(|| Error::new_spanned(ty, "expected `Vec<_>`"))?;
-
                 Repeatable { name, ty, setter }
             } else {
                 match is_option(&field.ty) {
@@ -459,7 +361,6 @@ mod field {
                     },
                 }
             };
-
             Ok(output)
         }
     }
@@ -531,8 +432,8 @@ mod field {
                     args: Vec<String>,
                 }
             };
-
             let field = input.named.first().unwrap();
+
             let output: BuilderField = field.try_into().unwrap();
 
             assert_eq!(
@@ -547,39 +448,122 @@ mod field {
     }
 }
 
-mod error {
-    use super::*;
-
-    #[cfg_attr(all(test, debug_assertions), derive(Debug))]
-    pub struct Error(syn::Error);
-
-    impl From<syn::Error> for Error {
-        fn from(value: syn::Error) -> Self {
-            Self(value)
-        }
-    }
-
-    impl ops::Deref for Error {
-        type Target = syn::Error;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    #[cfg(all(test, debug_assertions))]
-    impl PartialEq for Error {
-        fn eq(&self, other: &Self) -> bool {
-            self.0.to_string() == other.0.to_string()
-        }
-    }
-
-    #[cfg(all(test, debug_assertions))]
-    impl Eq for Error {}
-}
-
 #[cfg(test)]
-use stringify::*;
+mod tests {
+    use super::*;
+    use stringify::*;
+
+    fn create_input() -> DeriveInput {
+        parse_quote! {
+            #[derive(Builder)]
+            pub struct Command {
+                executable: String,
+                #[builder(each = "arg")]
+                args: Vec<String>,
+                #[builder(each = "env")]
+                env: Vec<String>,
+                current_dir: Option<String>,
+            }
+        }
+    }
+
+    #[test]
+    fn test_def_builder_struct() {
+        let input = create_input();
+        let builder: Builder = (&input).try_into().unwrap();
+
+        let output = builder.gen_builder_struct();
+
+        let expected: Result<ItemStruct> = Ok(parse_quote! {
+            #[derive(std::default::Default)]
+            pub struct CommandBuilder {
+                executable: std::option::Option<String>,
+                args: std::vec::Vec<String>,
+                env: std::vec::Vec<String>,
+                current_dir: std::option::Option<String>,
+            }
+        });
+        assert_eq!(expected.stringify(), output.stringify());
+    }
+
+    #[test]
+    fn test_impl_builder_setters() {
+        let input = create_input();
+        let builder: Builder = (&input).try_into().unwrap();
+
+        let output = builder.gen_builder_setters();
+
+        let expected: Result<ItemImpl> = Ok(parse_quote! {
+            impl CommandBuilder {
+                pub fn executable(&mut self, executable: String) -> &mut Self {
+                    self.executable = std::option::Option::Some(executable);
+                    self
+                }
+
+                pub fn arg(&mut self, arg: String) -> &mut Self {
+                    self.args.push(arg);
+                    self
+                }
+
+                pub fn args(&mut self, args: std::vec::Vec<String>) -> &mut Self {
+                    self.args = args;
+                    self
+                }
+
+                pub fn env(&mut self, env: String) -> &mut Self {
+                    self.env.push(env);
+                    self
+                }
+
+                pub fn current_dir(&mut self, current_dir: String) -> &mut Self {
+                    self.current_dir = std::option::Option::Some(current_dir);
+                    self
+                }
+            }
+        });
+        assert_eq!(expected.stringify(), output.stringify());
+    }
+
+    #[test]
+    fn test_impl_builder_ctor() {
+        let input = create_input();
+        let builder: Builder = (&input).try_into().unwrap();
+
+        let output = builder.gen_builder_ctor();
+
+        let expected: Result<ItemImpl> = Ok(parse_quote! {
+            impl Command {
+                pub fn builder() -> CommandBuilder {
+                    <CommandBuilder>::default()
+                }
+            }
+        });
+        assert_eq!(expected.stringify(), output.stringify());
+    }
+
+    #[test]
+    fn test_impl_target_ctor() {
+        let input = create_input();
+        let builder: Builder = (&input).try_into().unwrap();
+
+        let output = builder.gen_builder_build();
+
+        let expected: Result<ItemImpl> = Ok(parse_quote! {
+            impl CommandBuilder {
+                pub fn build(&self) -> std::result::Result<Command, std::boxed::Box<dyn std::error::Error>> {
+                    let target = Command {
+                        executable: self.executable.as_ref().cloned().ok_or_else(|| "executable must be set")?,
+                        args: self.args.clone(),
+                        env: self.env.clone(),
+                        current_dir: self.current_dir.as_ref().cloned(),
+                    };
+                    Ok(target)
+                }
+            }
+        });
+        assert_eq!(expected.stringify(), output.stringify());
+    }
+}
 
 #[cfg(test)]
 mod stringify {
